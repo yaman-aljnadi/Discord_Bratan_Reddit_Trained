@@ -1,37 +1,71 @@
-# Starting Steps of the Bratan Bot
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
-load_dotenv()
+import asyncio 
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
+load_dotenv()
 TOKEN = os.getenv("BRATAN_TOKEN")
 
-print(TOKEN)
+print("Loading Mistral-7B... this might take a minute.")
+
+model_name = "mistralai/Mistral-7B-Instruct-v0.3"
+
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token 
 
 
+model = AutoModelForCausalLM.from_pretrained(
+    model_name, 
+    torch_dtype=torch.float16, 
+    device_map="cuda", 
+    trust_remote_code=True
+)
 
-import discord
-from discord.ext import commands
+print("Mistral Loaded successfully!")
+
+
+def generate_mistral_response(user_input):
+    prompt = f"[INST] {user_input} [/INST]"
+    
+    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+    
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs, 
+            max_new_tokens=256,   
+            do_sample=True,       
+            temperature=0.7,      
+            pad_token_id=tokenizer.eos_token_id
+        )
+    
+    
+    full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+
+    if "[/INST]" in full_response:
+        response_text = full_response.split("[/INST]")[1].strip()
+    else:
+        response_text = full_response
+
+    return response_text
+
 
 intents = discord.Intents.default()
 intents.message_content = True 
 
-
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 
 @bot.event
 async def on_ready():
     print(f'SUCCESS: Logged in as {bot.user} (ID: {bot.user.id})')
     print('------')
 
-
 @bot.command()
 async def ping(ctx):
-    """Responds to !ping with Pong!"""
     await ctx.send('Pong!')
-
 
 @bot.event
 async def on_message(message):
@@ -40,8 +74,18 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+    # If it's a regular chat message (not starting with prefix), treat as AI Chat
+    # You might want to restrict this to specific channels or mentions later.
+    if not message.content.startswith(bot.command_prefix):
+        
+        # UX: Trigger "Bot is typing..." while GPU works
+        async with message.channel.typing():
+            
+            # CRITICAL: Run the blocking model generation in a separate thread
+            # This prevents the bot from "freezing" while waiting for the AI
+            response = await asyncio.to_thread(generate_mistral_response, message.content)
+            
+            await message.channel.send(response)
 
-    if message.content.lower() == "hello":
-        await message.channel.send("Hello there! I am ready to be an AI.")
-
-bot.run(TOKEN)
+if __name__ == "__main__":
+    bot.run(TOKEN)
