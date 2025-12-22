@@ -1,78 +1,61 @@
 import discord
 from discord.ext import commands
 import asyncio
+from gtts import gTTS
 import os
-# Import the advanced TTS library
-from TTS.api import TTS
 
 class AIChat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        print("⏳ Loading XTTS v2 Model... (This uses GPU)")
-        
-        # Load the model specifically to the GPU ('cuda')
-        # This will download the model on the first run.
-        self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-        
-        print("✅ XTTS Model Loaded! Ready to speak.")
 
-    def generate_voice_file(self, text):
+    def create_voice_file(self, text):
         """
-        Uses XTTS to generate high-quality audio.
-        Requires a 'voice_sample.wav' file in your project folder to clone the voice.
+        Converts text to speech and saves it to a file.
+        This is a blocking operation, so we run it in a thread later.
         """
-        # xtts_v2 supports: en, es, fr, de, it, pt, pl, tr, ru, nl, cs, ar, zh-cn, ja, hu, ko
-        self.tts.tts_to_file(
-            text=text, 
-            speaker_wav="voice_sample.wav",  # The file it clones the voice from
-            language="en", 
-            file_path="tts_output.wav"
-        )
+        tts = gTTS(text=text, lang='ru')
+        # Save to a generic file. This will be overwritten every time.
+        tts.save("tts_output.mp3")
 
     @commands.Cog.listener()
     async def on_message(self, message):
+        # Ignore bot's own messages
         if message.author == self.bot.user:
             return
 
+        # Don't respond if it starts with a command prefix
         if message.content.startswith(self.bot.command_prefix):
             return
 
+        # Check if the LLM engine is loaded
         if hasattr(self.bot, 'llm_engine'):
             async with message.channel.typing():
-                # 1. Generate Text (LLM)
+                # 1. Generate the Text Response (Blocking Code -> Thread)
                 response = await asyncio.to_thread(
                     self.bot.llm_engine.generate_response, 
                     message.content
                 )
                 
-                # Send text response
+                # 2. Send the Text Response to Discord
                 await message.channel.send(response)
 
-                # 2. Generate Voice (TTS)
+                # 3. Handle Voice Output
+                # Check if the bot is in a voice channel in this guild
                 if message.guild.voice_client and message.guild.voice_client.is_connected():
                     voice_client = message.guild.voice_client
-                    
+
                     if voice_client.is_playing():
                         voice_client.stop()
 
                     try:
-                        # Ensure the reference file exists before trying to clone
-                        if not os.path.exists("voice_sample.wav"):
-                            print("Error: 'voice_sample.wav' not found! Please add a voice sample.")
-                            return
+                        await asyncio.to_thread(self.create_voice_file, response)
 
-                        # Run XTTS in a separate thread (it's heavy!)
-                        await asyncio.to_thread(self.generate_voice_file, response)
-
-                        # XTTS outputs .wav, so we play that
-                        source = discord.FFmpegPCMAudio("tts_output.wav")
+                        source = discord.FFmpegPCMAudio("tts_output.mp3")
                         voice_client.play(source)
                     
                     except Exception as e:
                         print(f"Error playing voice: {e}")
-                        # Optional: Send error to chat for debugging
-                        # await message.channel.send(f"Voice Error: {e}")
-
+                        await message.channel.send("I tried to speak, but something went wrong with the audio.")
         else:
             print("Error: LLM Engine not loaded.")
 
