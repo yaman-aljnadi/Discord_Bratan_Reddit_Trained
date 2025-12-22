@@ -47,6 +47,7 @@ def generate_mistral_response(user_input):
 
     if "[/INST]" in full_response:
         response_text = full_response.split("[/INST]")[1].strip()
+        print(f"Generated Response: {response_text}")
     else:
         response_text = full_response
 
