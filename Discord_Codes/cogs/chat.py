@@ -12,8 +12,8 @@ class AIChat(commands.Cog):
         
         # --- CONFIGURATION ---
         # Point this to the .onnx file you downloaded in Step 2
-        # If it is in the same folder, just use the filename
-        self.model_path = "./piper_tts/ru_RU-ruslan-medium.onnx"
+        # If it is in the same folder, just use the filename 
+        self.model_path = "./piper_tts/ru_RU-irina-medium.onnx"
         self.output_file = "tts_output.wav"
         
         # Pre-load the voice model into memory (Much faster!)
