@@ -69,6 +69,29 @@ async def on_ready():
 async def ping(ctx):
     await ctx.send('Pong!')
 
+@bot.command()
+async def join(ctx):
+    """Joins the voice channel the user is currently in."""
+    if ctx.author.voice:
+        channel = ctx.author.voice.channel
+        # Check if bot is already in a voice channel
+        if ctx.voice_client: 
+            await ctx.voice_client.move_to(channel)
+        else:
+            await channel.connect()
+        await ctx.send(f"Joined **{channel.name}**!")
+    else:
+        await ctx.send("You need to be in a voice channel first so I can join you.")
+
+@bot.command(aliases=['kick']) # This allows !kick to work as an alias for !leave
+async def leave(ctx):
+    """Leaves the current voice channel."""
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        await ctx.send("Disconnected from voice channel.")
+    else:
+        await ctx.send("I'm not connected to a voice channel.")
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
