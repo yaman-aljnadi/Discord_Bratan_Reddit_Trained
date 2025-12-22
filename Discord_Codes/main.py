@@ -49,6 +49,7 @@ def generate_mistral_response(user_input):
         response_text = full_response.split("[/INST]")[1].strip()
         print(f"Generated Response: {response_text}")
     else:
+        print("Warning: [/INST] token not found in response.")
         response_text = full_response
 
     return response_text
