@@ -40,9 +40,9 @@ def generate_mistral_response(user_input):
             temperature=0.7,      
             pad_token_id=tokenizer.eos_token_id
         )
-    
-    
-    full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    generated_tokens = outputs[0][len(inputs["input_ids"][0]):]
+    full_response = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     
 
     if "[/INST]" in full_response:
