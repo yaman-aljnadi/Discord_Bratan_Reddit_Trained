@@ -6,7 +6,7 @@ from multiprocessing import Pool, cpu_count
 from transformers import AutoTokenizer
 
 # --- Configuration ---
-SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data" 
+SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data/2007" 
 OUTPUT_DIR = "./processed_data_chat"
 MIN_SCORE = 3       
 MIN_WORDS = 5       
