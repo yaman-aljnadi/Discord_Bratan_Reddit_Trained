@@ -10,7 +10,7 @@ from collections import defaultdict
 SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data/2007" 
 OUTPUT_DIR = "./processed_data_best_only"
 MIN_SCORE = 5        
-MIN_WORDS = 3       
+MIN_WORDS = 5       
 MAX_WORDS = 1000    
 MAX_WORKERS = 12
 
