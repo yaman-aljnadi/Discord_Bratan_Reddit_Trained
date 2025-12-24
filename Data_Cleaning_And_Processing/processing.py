@@ -4,13 +4,16 @@ import json
 import re
 from multiprocessing import Pool, cpu_count
 from transformers import AutoTokenizer
+from collections import defaultdict
 
 # --- Configuration ---
-SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data/2007" 
-OUTPUT_DIR = "./processed_data_chat"
 MIN_SCORE = 3       
-MIN_WORDS = 5       
+SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data" 
+OUTPUT_DIR = "./processed_data_best_only"
+MIN_SCORE = 5        # STRICTER threshold (User requested 5)
+MIN_WORDS = 3       
 MAX_WORDS = 1000    
+MAX_WORKERS = 12
 
 # DGX Memory Management
 # We need to limit workers because we are loading whole files into RAM now.
@@ -28,7 +31,7 @@ except:
     tokenizer = None
 
 def clean_text(text):
-    """Basic cleaning to remove links and whitespace."""
+    """Basic cleaning."""
     text = re.sub(r'http\S+', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -40,20 +43,21 @@ def count_tokens(text):
     else:
         # Rough estimate: 1 word ~= 1.3 tokens
         return int(len(text.split()) * 1.3)
-
-def process_file_pairing(file_path):
+def process_file_best_child(file_path):
     """
-    Reads a whole .bz2 file, builds a map, and links Parent -> Child.
-    Returns: (File Name, Num Pairs Created, Total Tokens)
+    1. Loads file.
+    2. Groups children by Parent ID.
+    3. Selects ONLY the highest scoring child for each parent.
     """
     file_name = os.path.basename(file_path)
-    output_file = os.path.join(OUTPUT_DIR, file_name.replace('.bz2', '_chat.jsonl'))
+    output_file = os.path.join(OUTPUT_DIR, file_name.replace('.bz2', '_best_chat.jsonl'))
     
     if os.path.exists(output_file):
-        return (file_name, 0, 0) # Skip if done
+        return (file_name, 0)
 
-    # 1. Load Data into Memory (The "Map" Phase)
-    comment_map = {} 
+    # 1. Load Data & Group by Parent
+    comment_map = {}          # Store all valid comments by their own ID
+    children_by_parent = defaultdict(list) # Store list of children for every parent ID
     
     try:
         with bz2.open(file_path, "rt", encoding="utf-8") as source:
@@ -61,74 +65,78 @@ def process_file_pairing(file_path):
                 try:
                     data = json.loads(line)
                     
-                    # Basic Filtering
+                    # Basic Cleanup Filters
                     if data.get('body') in ['[deleted]', '[removed]']: continue
-                    if data.get('score', 0) < MIN_SCORE: continue
                     
-                    body = data.get('body', '')
-                    word_count = len(body.split())
-                    if word_count < MIN_WORDS or word_count > MAX_WORDS: continue
-
-                    cleaned_body = clean_text(body)
+                    # We DON'T filter by score yet, because even a low score comment 
+                    # might be a valid PARENT (Instruction).
                     
-                    # Store in map: ID -> {Text, Parent_ID}
-                    # We strip "t1_" from parent_id to match the 'id' format
+                    body = clean_text(data.get('body', ''))
+                    if len(body.split()) < MIN_WORDS: continue
+                    
                     c_id = data.get('id')
                     p_id = data.get('parent_id', '')
-                    if p_id.startswith('t1_'):
-                        p_id = p_id[3:] # Remove 't1_' prefix
+                    if p_id.startswith('t1_'): p_id = p_id[3:]
                     
-                    comment_map[c_id] = {
-                        "text": cleaned_body,
-                        "parent_id": p_id,
-                        "subreddit": data.get('subreddit')
+                    score = data.get('score', 0)
+                    
+                    obj = {
+                        "id": c_id,
+                        "text": body,
+                        "score": score,
+                        "subreddit": data.get('subreddit'),
+                        "parent_id": p_id
                     }
+                    
+                    # Store for lookup
+                    comment_map[c_id] = obj
+                    
+                    # Grouping for "Sibling Competition"
+                    children_by_parent[p_id].append(obj)
                     
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-        # 2. Link Parents to Children (The "Reduce/Join" Phase)
+        # 2. The "Battle Royale" - Find Best Child
         chat_pairs = []
-        total_tokens = 0
         
-        for c_id, child_data in comment_map.items():
-            parent_id = child_data['parent_id']
+        # Iterate through every parent we found
+        for p_id, children in children_by_parent.items():
             
-            # Check if parent exists in our map
-            if parent_id in comment_map:
-                parent_data = comment_map[parent_id]
+            # Check if we actually have the Parent text (Instruction)
+            if p_id in comment_map:
+                parent_obj = comment_map[p_id]
                 
-                # Format for Chat/Instruction Tuning
-                # Instruction = Parent Comment
-                # Response = Child Comment
-                instruction = parent_data['text']
-                response = child_data['text']
+                # SORT children by Score (Highest first)
+                children.sort(key=lambda x: x['score'], reverse=True)
                 
-                # Calculate Tokens (Instruction + Response)
-                pair_tokens = count_tokens(instruction) + count_tokens(response)
-                total_tokens += pair_tokens
-
-                entry = {
-                    "instruction": instruction,
-                    "response": response,
-                    "meta": {
-                        "subreddit": child_data['subreddit'],
-                        "id": c_id,
-                        "parent_id": parent_id
+                winner = children[0]
+                
+                # 3. Apply the "Winner" Threshold
+                if winner['score'] >= MIN_SCORE:
+                    
+                    entry = {
+                        "instruction": parent_obj['text'],
+                        "response": winner['text'],
+                        "meta": {
+                            "subreddit": winner['subreddit'],
+                            "score": winner['score'],
+                            "id": winner['id'],
+                            "parent_id": p_id
+                        }
                     }
-                }
-                chat_pairs.append(json.dumps(entry))
+                    chat_pairs.append(json.dumps(entry))
 
-        # 3. Write to Disk
+        # Write to disk
         if chat_pairs:
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write('\n'.join(chat_pairs) + '\n')
         
-        return (file_name, len(chat_pairs), total_tokens)
+        return (file_name, len(chat_pairs))
 
     except Exception as e:
-        print(f"Error in {file_name}: {e}")
-        return (file_name, 0, 0)
+        print(f"Error {file_name}: {e}")
+        return (file_name, 0)
 
 def get_all_files(root_dir):
     file_list = []
@@ -149,7 +157,7 @@ if __name__ == '__main__':
 
     # Using imap to get results as they finish
     with Pool(MAX_WORKERS) as pool:
-        for fname, pairs, tokens in pool.imap_unordered(process_file_pairing, files):
+        for fname, pairs, tokens in pool.imap_unordered(process_file_best_child, files):
             grand_total_pairs += pairs
             grand_total_tokens += tokens
             if pairs > 0:
