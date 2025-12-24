@@ -3,99 +3,132 @@ import bz2
 import json
 import re
 from multiprocessing import Pool, cpu_count
-from pathlib import Path
+from transformers import AutoTokenizer
 
 # --- Configuration ---
-SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data/2007"  # Your root folder
-OUTPUT_DIR = "./processed_data" # Where to save the clean files
-MIN_SCORE = 3       # Only keep comments with upvotes > 3
-MIN_WORDS = 5       # Filter out "lol", "thanks", etc.
-MAX_WORDS = 1000    # Filter out massive copy-pastes/spam
-BATCH_SIZE = 10000  # How many lines to write at once
+SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data" 
+OUTPUT_DIR = "./processed_data_chat"
+MIN_SCORE = 3       
+MIN_WORDS = 5       
+MAX_WORDS = 1000    
 
-# Ensure output directory exists
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# DGX Memory Management
+# We need to limit workers because we are loading whole files into RAM now.
+# With 128GB RAM, 10-12 workers is safe.
+MAX_WORKERS = 12 
+
+# Initialize Tokenizer (Global to avoid reloading)
+# We use the Mistral tokenizer to get an exact count for your training planning.
+MODEL_ID = "mistralai/Mistral-7B-v0.1" 
+try:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+except:
+    # Fallback if you haven't logged into HuggingFace or don't have net access
+    print("Warning: Could not load Mistral Tokenizer. Using whitespace approximation.")
+    tokenizer = None
 
 def clean_text(text):
-    """
-    Basic text cleaning.
-    """
-    # Remove URL links (simple regex)
+    """Basic cleaning to remove links and whitespace."""
     text = re.sub(r'http\S+', '', text)
-    # Remove multiple newlines/spaces
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def process_file(file_path):
+def count_tokens(text):
+    """Returns exact token count if tokenizer is loaded, else estimates."""
+    if tokenizer:
+        return len(tokenizer.encode(text))
+    else:
+        # Rough estimate: 1 word ~= 1.3 tokens
+        return int(len(text.split()) * 1.3)
+
+def process_file_pairing(file_path):
     """
-    Reads a single .bz2 file, filters content, and writes to a .jsonl file.
+    Reads a whole .bz2 file, builds a map, and links Parent -> Child.
+    Returns: (File Name, Num Pairs Created, Total Tokens)
     """
     file_name = os.path.basename(file_path)
-    output_file = os.path.join(OUTPUT_DIR, file_name.replace('.bz2', '_clean.jsonl'))
+    output_file = os.path.join(OUTPUT_DIR, file_name.replace('.bz2', '_chat.jsonl'))
     
-    # Skip if already processed
     if os.path.exists(output_file):
-        return f"Skipped {file_name}"
+        return (file_name, 0, 0) # Skip if done
 
-    valid_rows = []
+    # 1. Load Data into Memory (The "Map" Phase)
+    comment_map = {} 
     
     try:
-        # bz2.open allows streaming the compressed file directly
-        with bz2.open(file_path, "rt", encoding="utf-8") as source, \
-             open(output_file, "w", encoding="utf-8") as target:
-            
+        with bz2.open(file_path, "rt", encoding="utf-8") as source:
             for line in source:
                 try:
                     data = json.loads(line)
                     
-                    # --- FILTERING LOGIC ---
+                    # Basic Filtering
+                    if data.get('body') in ['[deleted]', '[removed]']: continue
+                    if data.get('score', 0) < MIN_SCORE: continue
                     
-                    # 1. Skip deleted/removed
                     body = data.get('body', '')
-                    if body in ['[deleted]', '[removed]']:
-                        continue
-                        
-                    # 2. Score Filter (Quality Control)
-                    if data.get('score', 0) < MIN_SCORE:
-                        continue
-                        
-                    # 3. Length Filter
                     word_count = len(body.split())
-                    if word_count < MIN_WORDS or word_count > MAX_WORDS:
-                        continue
+                    if word_count < MIN_WORDS or word_count > MAX_WORDS: continue
+
+                    cleaned_body = clean_text(body)
                     
-                    # 4. Content Cleaning
-                    clean_body = clean_text(body)
+                    # Store in map: ID -> {Text, Parent_ID}
+                    # We strip "t1_" from parent_id to match the 'id' format
+                    c_id = data.get('id')
+                    p_id = data.get('parent_id', '')
+                    if p_id.startswith('t1_'):
+                        p_id = p_id[3:] # Remove 't1_' prefix
                     
-                    # Prepare the object for training
-                    # We keep subreddit info as it might be useful for prompt steering later
-                    training_entry = {
-                        "text": clean_body,
-                        "meta": {
-                            "subreddit": data.get('subreddit'),
-                            "score": data.get('score'),
-                            "id": data.get('id')
-                        }
+                    comment_map[c_id] = {
+                        "text": cleaned_body,
+                        "parent_id": p_id,
+                        "subreddit": data.get('subreddit')
                     }
                     
-                    valid_rows.append(json.dumps(training_entry))
-                    
-                    # Write in batches to save RAM
-                    if len(valid_rows) >= BATCH_SIZE:
-                        target.write('\n'.join(valid_rows) + '\n')
-                        valid_rows = []
-                        
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-            # Write remaining rows
-            if valid_rows:
-                target.write('\n'.join(valid_rows) + '\n')
-                
-        return f"Completed {file_name}"
+        # 2. Link Parents to Children (The "Reduce/Join" Phase)
+        chat_pairs = []
+        total_tokens = 0
         
+        for c_id, child_data in comment_map.items():
+            parent_id = child_data['parent_id']
+            
+            # Check if parent exists in our map
+            if parent_id in comment_map:
+                parent_data = comment_map[parent_id]
+                
+                # Format for Chat/Instruction Tuning
+                # Instruction = Parent Comment
+                # Response = Child Comment
+                instruction = parent_data['text']
+                response = child_data['text']
+                
+                # Calculate Tokens (Instruction + Response)
+                pair_tokens = count_tokens(instruction) + count_tokens(response)
+                total_tokens += pair_tokens
+
+                entry = {
+                    "instruction": instruction,
+                    "response": response,
+                    "meta": {
+                        "subreddit": child_data['subreddit'],
+                        "id": c_id,
+                        "parent_id": parent_id
+                    }
+                }
+                chat_pairs.append(json.dumps(entry))
+
+        # 3. Write to Disk
+        if chat_pairs:
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write('\n'.join(chat_pairs) + '\n')
+        
+        return (file_name, len(chat_pairs), total_tokens)
+
     except Exception as e:
-        return f"Error processing {file_name}: {str(e)}"
+        print(f"Error in {file_name}: {e}")
+        return (file_name, 0, 0)
 
 def get_all_files(root_dir):
     file_list = []
@@ -106,16 +139,25 @@ def get_all_files(root_dir):
     return file_list
 
 if __name__ == '__main__':
-    # 1. Gather all files
-    files_to_process = get_all_files(SOURCE_DIR)
-    print(f"Found {len(files_to_process)} files to process.")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # 2. Utilize DGX Cores
-    # Leave 2 cores free for system stability
-    num_workers = max(1, cpu_count() - 2)
-    print(f"Starting processing pool with {num_workers} workers...")
+    files = get_all_files(SOURCE_DIR)
+    print(f"Found {len(files)} files. Starting processing with {MAX_WORKERS} workers.")
     
-    # 3. process in parallel
-    with Pool(num_workers) as pool:
-        for result in pool.imap_unordered(process_file, files_to_process):
-            print(result)
+    grand_total_tokens = 0
+    grand_total_pairs = 0
+
+    # Using imap to get results as they finish
+    with Pool(MAX_WORKERS) as pool:
+        for fname, pairs, tokens in pool.imap_unordered(process_file_pairing, files):
+            grand_total_pairs += pairs
+            grand_total_tokens += tokens
+            if pairs > 0:
+                print(f"Processed {fname}: {pairs} pairs | {tokens/1e6:.2f} M tokens")
+
+    print("-" * 30)
+    print("PROCESSING COMPLETE")
+    print(f"Total Chat Pairs: {grand_total_pairs:,}")
+    print(f"Total Tokens: {grand_total_tokens:,}")
+    print(f"Estimated Training Data Size: {grand_total_tokens / 1e9:.4f} Billion Tokens")
+    print("-" * 30)
