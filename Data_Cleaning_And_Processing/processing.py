@@ -7,7 +7,6 @@ from transformers import AutoTokenizer
 from collections import defaultdict
 
 # --- Configuration ---
-MIN_SCORE = 3       
 SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data" 
 OUTPUT_DIR = "./processed_data_best_only"
 MIN_SCORE = 5        # STRICTER threshold (User requested 5)
