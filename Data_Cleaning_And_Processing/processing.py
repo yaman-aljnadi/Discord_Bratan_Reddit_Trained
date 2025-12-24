@@ -12,8 +12,8 @@ SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data"
 OUTPUT_DIR = "./processed_data_chat_best"
 
 # Filtration Thresholds
-MIN_SCORE = 5        # Strict quality control (Score must be >= 5)
-MIN_WORDS = 3        # Skip "lol", "this", "yes"
+MIN_SCORE = 3        # Strict quality control (Score must be >= 5)
+MIN_WORDS = 5        # Skip "lol", "this", "yes"
 MAX_WORDS = 1000     # Skip massive copy-pastes
 MAX_WORKERS = 12     # Safe for 128GB RAM on DGX
 
