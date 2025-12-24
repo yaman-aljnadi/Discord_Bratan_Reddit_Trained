@@ -3,35 +3,40 @@ import bz2
 import json
 import re
 from multiprocessing import Pool, cpu_count
-from transformers import AutoTokenizer
 from collections import defaultdict
+from time import time
+from transformers import AutoTokenizer
 
 # --- Configuration ---
-SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data/2007" 
-OUTPUT_DIR = "./processed_data_best_only"
-MIN_SCORE = 5        
-MIN_WORDS = 5       
-MAX_WORDS = 1000    
-MAX_WORKERS = 12
+SOURCE_DIR = "Reddit_Data/My_250GB_Reddit_Data" 
+OUTPUT_DIR = "./processed_data_chat_best"
 
-# DGX Memory Management
-# We need to limit workers because we are loading whole files into RAM now.
-# With 128GB RAM, 10-12 workers is safe.
-MAX_WORKERS = 12 
+# Filtration Thresholds
+MIN_SCORE = 5        # Strict quality control (Score must be >= 5)
+MIN_WORDS = 3        # Skip "lol", "this", "yes"
+MAX_WORDS = 1000     # Skip massive copy-pastes
+MAX_WORKERS = 12     # Safe for 128GB RAM on DGX
 
-# Initialize Tokenizer (Global to avoid reloading)
-# We use the Mistral tokenizer to get an exact count for your training planning.
+# --- Tokenizer Initialization ---
+# We load this globally so workers can access it via copy-on-write
 MODEL_ID = "mistralai/Mistral-7B-v0.1" 
 try:
+    print(f"Loading tokenizer for {MODEL_ID}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-except:
-    # Fallback if you haven't logged into HuggingFace or don't have net access
-    print("Warning: Could not load Mistral Tokenizer. Using whitespace approximation.")
+    print("Tokenizer loaded successfully.")
+except Exception as e:
+    print(f"Warning: Could not load Mistral Tokenizer ({e}). Using whitespace approximation.")
     tokenizer = None
 
 def clean_text(text):
-    """Basic cleaning."""
+    """
+    Basic text cleaning to remove links and excessive whitespace.
+    """
+    if not text:
+        return ""
+    # Remove URL links
     text = re.sub(r'http\S+', '', text)
+    # Remove multiple newlines/spaces and strip
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -42,81 +47,102 @@ def count_tokens(text):
     else:
         # Rough estimate: 1 word ~= 1.3 tokens
         return int(len(text.split()) * 1.3)
+
 def process_file_best_child(file_path):
     """
-    1. Loads file.
-    2. Groups children by Parent ID.
-    3. Selects ONLY the highest scoring child for each parent.
+    1. Reads .bz2 file.
+    2. Groups comments by Parent ID.
+    3. Selects HIGHEST SCORING child (>= MIN_SCORE).
+    4. Creates Instruction/Response pair.
+    5. Counts tokens for that pair.
     """
     file_name = os.path.basename(file_path)
     output_file = os.path.join(OUTPUT_DIR, file_name.replace('.bz2', '_best_chat.jsonl'))
     
+    # Skip if already done
     if os.path.exists(output_file):
-        return (file_name, 0)
+        return (file_name, 0, 0)
 
-    # 1. Load Data & Group by Parent
-    comment_map = {}          # Store all valid comments by their own ID
-    children_by_parent = defaultdict(list) # Store list of children for every parent ID
+    # Data Structures
+    comment_map = {}          # Maps ID -> Comment Data (used to retrieve "Instruction")
+    children_by_parent = defaultdict(list) # Maps Parent_ID -> List of potential "Responses"
     
     try:
+        # --- PHASE 1: LOAD & GROUP ---
         with bz2.open(file_path, "rt", encoding="utf-8") as source:
             for line in source:
                 try:
                     data = json.loads(line)
                     
-                    # Basic Cleanup Filters
-                    if data.get('body') in ['[deleted]', '[removed]']: continue
+                    # 1. Basic Content Filter
+                    body = data.get('body', '')
+                    if body in ['[deleted]', '[removed]']: 
+                        continue
                     
-                    # We DON'T filter by score yet, because even a low score comment 
-                    # might be a valid PARENT (Instruction).
+                    # 2. Length Filter
+                    clean_body = clean_text(body)
+                    word_count = len(clean_body.split())
                     
-                    body = clean_text(data.get('body', ''))
-                    if len(body.split()) < MIN_WORDS: continue
+                    if word_count < MIN_WORDS or word_count > MAX_WORDS: 
+                        continue
                     
+                    # 3. Extract IDs
                     c_id = data.get('id')
                     p_id = data.get('parent_id', '')
-                    if p_id.startswith('t1_'): p_id = p_id[3:]
                     
+                    # Standardize Parent ID
+                    if '_' in p_id:
+                        p_id = p_id.split('_')[1]
+                        
+                    # 4. Store Data
                     score = data.get('score', 0)
                     
-                    obj = {
+                    comment_obj = {
                         "id": c_id,
-                        "text": body,
+                        "text": clean_body,
                         "score": score,
                         "subreddit": data.get('subreddit'),
                         "parent_id": p_id
                     }
                     
-                    # Store for lookup
-                    comment_map[c_id] = obj
+                    # Save to map (Potential Instruction)
+                    comment_map[c_id] = comment_obj
                     
-                    # Grouping for "Sibling Competition"
-                    children_by_parent[p_id].append(obj)
+                    # Save to grouping (Potential Response)
+                    children_by_parent[p_id].append(comment_obj)
                     
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-        # 2. The "Battle Royale" - Find Best Child
+        # --- PHASE 2: SELECT BEST CHILD & COUNT TOKENS ---
         chat_pairs = []
+        file_token_count = 0
         
-        # Iterate through every parent we found
+        # Iterate through every parent ID we found children for
         for p_id, children in children_by_parent.items():
             
-            # Check if we actually have the Parent text (Instruction)
+            # We can only create a pair if we have the Parent's text in this file
             if p_id in comment_map:
                 parent_obj = comment_map[p_id]
                 
-                # SORT children by Score (Highest first)
+                # Sort children by score (Highest first)
                 children.sort(key=lambda x: x['score'], reverse=True)
-                
                 winner = children[0]
                 
-                # 3. Apply the "Winner" Threshold
+                # --- PHASE 3: FINAL QUALITY CHECK ---
                 if winner['score'] >= MIN_SCORE:
                     
+                    instruction_text = parent_obj['text']
+                    response_text = winner['text']
+
+                    # Calculate Tokens (Instruction + Response)
+                    pair_tokens = count_tokens(instruction_text) + count_tokens(response_text)
+                    file_token_count += pair_tokens
+                    
+                    # Create Entry
                     entry = {
-                        "instruction": parent_obj['text'],
-                        "response": winner['text'],
+                        "instruction": instruction_text,
+                        "response": response_text,
                         "meta": {
                             "subreddit": winner['subreddit'],
                             "score": winner['score'],
@@ -126,16 +152,16 @@ def process_file_best_child(file_path):
                     }
                     chat_pairs.append(json.dumps(entry))
 
-        # Write to disk
+        # --- PHASE 4: WRITE TO DISK ---
         if chat_pairs:
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write('\n'.join(chat_pairs) + '\n')
         
-        return (file_name, len(chat_pairs))
+        return (file_name, len(chat_pairs), file_token_count)
 
     except Exception as e:
-        print(f"Error {file_name}: {e}")
-        return (file_name, 0)
+        print(f"Error processing {file_name}: {e}")
+        return (file_name, 0, 0)
 
 def get_all_files(root_dir):
     file_list = []
@@ -146,25 +172,31 @@ def get_all_files(root_dir):
     return file_list
 
 if __name__ == '__main__':
+    # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    files = get_all_files(SOURCE_DIR)
-    print(f"Found {len(files)} files. Starting processing with {MAX_WORKERS} workers.")
+    # Gather files
+    files_to_process = get_all_files(SOURCE_DIR)
+    print(f"Found {len(files_to_process)} files to process.")
+    print(f"Config: Min Score={MIN_SCORE}, Workers={MAX_WORKERS}")
     
-    grand_total_tokens = 0
+    start_time = time()
     grand_total_pairs = 0
-
-    # Using imap to get results as they finish
+    grand_total_tokens = 0
+    
+    # Run Parallel Processing
     with Pool(MAX_WORKERS) as pool:
-        for fname, pairs, tokens in pool.imap_unordered(process_file_best_child, files):
-            grand_total_pairs += pairs
-            grand_total_tokens += tokens
-            if pairs > 0:
-                print(f"Processed {fname}: {pairs} pairs | {tokens/1e6:.2f} M tokens")
+        for file_name, pair_count, token_count in pool.imap_unordered(process_file_best_child, files_to_process):
+            grand_total_pairs += pair_count
+            grand_total_tokens += token_count
+            
+            if pair_count > 0:
+                print(f"Processed {file_name}: {pair_count} pairs | {token_count/1e6:.2f} M tokens")
 
+    duration = time() - start_time
     print("-" * 30)
-    print("PROCESSING COMPLETE")
-    print(f"Total Chat Pairs: {grand_total_pairs:,}")
+    print(f"PROCESSING COMPLETE in {duration:.2f} seconds")
+    print(f"Total High-Quality Pairs: {grand_total_pairs:,}")
     print(f"Total Tokens: {grand_total_tokens:,}")
     print(f"Estimated Training Data Size: {grand_total_tokens / 1e9:.4f} Billion Tokens")
     print("-" * 30)
