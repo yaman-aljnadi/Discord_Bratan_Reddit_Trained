@@ -8,29 +8,25 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments,
 )
-
 from trl import SFTTrainer, SFTConfig
 
 # --- Configuration ---
-# Point this to your output directory from the previous script
 DATA_PATH = "/home/yaljnadi/Desktop/Discord_Bratan_Reddit_Trained/Data_Cleaning_And_Processing/processed_data_chat_best/" 
 OUTPUT_DIR = "./mistral-reddit-15B-v1"
 MODEL_ID = "mistralai/Mistral-7B-v0.1"
 
-# Hyperparameters for 15B tokens
-# We use a larger batch size via accumulation to stabilize the massive data intake
-BATCH_SIZE = 16        # Adjust based on VRAM (try 8 or 16 per GPU)
-GRAD_ACCUMULATION = 2  # effective batch = batch_size * num_gpus * grad_accum
-LEARNING_RATE = 1e-4   # QLoRA standard (higher than full ft)
-NUM_EPOCHS = 1         # With 15B tokens, 1 epoch is likely enough to shift the style totally
-MAX_SEQ_LENGTH = 2048  # Mistral context window
+# Hyperparameters
+BATCH_SIZE = 16        
+GRAD_ACCUMULATION = 2  
+LEARNING_RATE = 1e-4   
+NUM_EPOCHS = 1        
+MAX_SEQ_LENGTH = 2048  
 
 def formatting_func(example):
     """
     Formats the input into the Mistral instruction format.
     Format: <s>[INST] {instruction} [/INST] {response}</s>
     """
-    # Note: The tokenizer usually adds <s> automatically, so we handle the rest
     text = f"[INST] {example['instruction']} [/INST] {example['response']}"
     return [text]
 
@@ -60,8 +56,7 @@ def main():
         quantization_config=bnb_config,
         device_map="auto",
         use_cache=False,
-        # CRITICAL CHANGE: Switch to 'sdpa' since flash-attn failed to install
-        attn_implementation="sdpa" 
+        attn_implementation="sdpa"  # Using native PyTorch SDPA (stable on Blackwell)
     )
     
     model = prepare_model_for_kbit_training(model)
@@ -80,6 +75,7 @@ def main():
     )
 
     # 5. Training Arguments
+    # NOTE: 'max_seq_length' and 'packing' MUST be here for newer trl versions
     args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
@@ -97,7 +93,11 @@ def main():
         lr_scheduler_type="cosine",
         report_to="tensorboard",
         ddp_find_unused_parameters=False,
-        dataset_text_field=None, 
+        
+        # --- Critical Arguments Moved HERE ---
+        max_seq_length=MAX_SEQ_LENGTH,
+        packing=True,
+        dataset_text_field="text", # Explicitly name a field (even if virtual) to satisfy config checks
     )
 
     # 6. Initialize Trainer
@@ -105,14 +105,10 @@ def main():
         model=model,
         train_dataset=dataset,
         peft_config=peft_config,
-        
-        # --- FIX 1: Renamed Argument ---
-        processing_class=tokenizer,  # Replaces 'tokenizer=tokenizer'
-        
+        processing_class=tokenizer, # Use 'processing_class' instead of 'tokenizer'
         formatting_func=formatting_func,
         args=args,
-        max_seq_length=MAX_SEQ_LENGTH, 
-        packing=True                   
+        # REMOVED max_seq_length and packing from here
     )
 
     print("Starting training...")
