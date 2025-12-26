@@ -24,28 +24,10 @@ NUM_EPOCHS = 1
 MAX_SEQ_LENGTH = 2048  
 
 def formatting_func(example):
-    """
-    Formats the input into the Mistral instruction format.
-    Format: <s>[INST] {instruction} [/INST] {response}</s>
-    """
-    # Safety check for empty fields to prevent training crashes
     instr = example.get('instruction', '')
     resp = example.get('response', '')
     text = f"[INST] {instr} [/INST] {resp}"
     return [text]
-
-def get_compatible_args(cls, **kwargs):
-    """
-    Dynamic argument filtering:
-    Inspects the class __init__ method and only passes arguments 
-    that the class actually accepts.
-    """
-    sig = inspect.signature(cls.__init__)
-    valid_args = {}
-    for k, v in kwargs.items():
-        if k in sig.parameters or 'kwargs' in sig.parameters:
-            valid_args[k] = v
-    return valid_args
 
 def main():
     print(f"--- Starting Training Job on Blackwell GB10 ---")
@@ -74,7 +56,7 @@ def main():
         quantization_config=bnb_config,
         device_map="auto",
         use_cache=False,
-        attn_implementation="sdpa"  # STABLE for GB10 (since FlashAttn failed)
+        attn_implementation="sdpa"  # STABLE for GB10
     )
     
     model = prepare_model_for_kbit_training(model)
@@ -92,36 +74,35 @@ def main():
         ],
     )
 
-    # 5. Dynamic Configuration Construction
-    # We define ALL intended arguments here
-    all_config_args = {
-        "output_dir": OUTPUT_DIR,
-        "num_train_epochs": NUM_EPOCHS,
-        "per_device_train_batch_size": BATCH_SIZE,
-        "gradient_accumulation_steps": GRAD_ACCUMULATION,
-        "gradient_checkpointing": True,
-        "optim": "paged_adamw_32bit",
-        "logging_steps": 100,
-        "save_strategy": "steps",
-        "save_steps": 2000,
-        "learning_rate": LEARNING_RATE,
-        "bf16": True,
-        "max_grad_norm": 0.3,
-        "warmup_ratio": 0.03,
-        "lr_scheduler_type": "cosine",
-        "report_to": "tensorboard",
-        "ddp_find_unused_parameters": False,
-        "dataset_text_field": "text",
-        # These are the trouble makers:
-        "max_seq_length": MAX_SEQ_LENGTH,
-        "packing": True
-    }
+    # 5. Initialize Config WITHOUT the problematic arguments first
+    print("Configuring arguments...")
+    args = SFTConfig(
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=NUM_EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUMULATION,
+        gradient_checkpointing=True,
+        optim="paged_adamw_32bit",
+        logging_steps=100,
+        save_strategy="steps",
+        save_steps=2000,
+        learning_rate=LEARNING_RATE,
+        bf16=True,
+        max_grad_norm=0.3,
+        warmup_ratio=0.03,
+        lr_scheduler_type="cosine",
+        report_to="tensorboard",
+        ddp_find_unused_parameters=False,
+        dataset_text_field="text",
+    )
 
-    # Filter args that SFTConfig ACTUALLY accepts
-    safe_config_args = get_compatible_args(SFTConfig, **all_config_args)
-    args = SFTConfig(**safe_config_args)
+    # --- THE FIX: Manually inject the parameters ---
+    # This bypasses the __init__ check that was failing
+    args.max_seq_length = MAX_SEQ_LENGTH
+    args.packing = True
+    print(f"DEBUG: Manually injected max_seq_length={args.max_seq_length}")
 
-    # 6. Initialize Trainer (Dynamic)
+    # 6. Initialize Trainer
     trainer_kwargs = {
         "model": model,
         "train_dataset": dataset,
@@ -130,16 +111,7 @@ def main():
         "args": args,
     }
 
-    # Add max_seq_length/packing to Trainer if Config didn't take them
-    if "max_seq_length" not in safe_config_args:
-        print("DEBUG: Passing max_seq_length to Trainer directly.")
-        trainer_kwargs["max_seq_length"] = MAX_SEQ_LENGTH
-    
-    if "packing" not in safe_config_args:
-        print("DEBUG: Passing packing to Trainer directly.")
-        trainer_kwargs["packing"] = True
-
-    # Handle the 'tokenizer' vs 'processing_class' rename
+    # Handle the 'tokenizer' vs 'processing_class' rename dynamically
     trainer_sig = inspect.signature(SFTTrainer.__init__)
     if "processing_class" in trainer_sig.parameters:
         print("DEBUG: Using 'processing_class' argument.")
@@ -148,7 +120,7 @@ def main():
         print("DEBUG: Using 'tokenizer' argument.")
         trainer_kwargs["tokenizer"] = tokenizer
 
-    # Initialize
+    # Initialize Trainer (Clean, without extra args)
     trainer = SFTTrainer(**trainer_kwargs)
 
     print("Starting training...")
