@@ -64,7 +64,7 @@ def main():
         quantization_config=bnb_config,
         device_map="auto",
         use_cache=False,  # Disable cache for training
-        attn_implementation="flash_attention_2" # MANDATORY for speed on DGX
+        attn_implementation="sdpa" # MANDATORY for speed on DGX
     )
     
     model = prepare_model_for_kbit_training(model)
