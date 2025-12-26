@@ -99,7 +99,7 @@ def main():
     # --- THE FIX: Manually inject the parameters ---
     # This bypasses the __init__ check that was failing
     args.max_seq_length = MAX_SEQ_LENGTH
-    args.packing = True
+    args.packing = False
     print(f"DEBUG: Manually injected max_seq_length={args.max_seq_length}")
 
     # 6. Initialize Trainer
