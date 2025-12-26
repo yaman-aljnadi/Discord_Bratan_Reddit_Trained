@@ -24,10 +24,16 @@ NUM_EPOCHS = 1
 MAX_SEQ_LENGTH = 2048  
 
 def formatting_func(example):
+    """
+    Formats the input into the Mistral instruction format.
+    """
     instr = example.get('instruction', '')
     resp = example.get('response', '')
     text = f"[INST] {instr} [/INST] {resp}"
-    return [text]
+    
+    # --- CRITICAL FIX ---
+    # When packing=False, we must return the STRING directly, not a list.
+    return text 
 
 def main():
     print(f"--- Starting Training Job on Blackwell GB10 ---")
@@ -74,7 +80,8 @@ def main():
         ],
     )
 
-    # 5. Initialize Config WITHOUT the problematic arguments first
+    # 5. Initialize Config
+    # We turn OFF packing here to fix the Blackwell compatibility
     print("Configuring arguments...")
     args = SFTConfig(
         output_dir=OUTPUT_DIR,
@@ -83,9 +90,12 @@ def main():
         gradient_accumulation_steps=GRAD_ACCUMULATION,
         gradient_checkpointing=True,
         optim="paged_adamw_32bit",
-        logging_steps=100,
+        
+        # Save checkpoints more frequently so you don't lose progress
+        logging_steps=50,
         save_strategy="steps",
-        save_steps=2000,
+        save_steps=500,  # Saves every ~500 steps
+        
         learning_rate=LEARNING_RATE,
         bf16=True,
         max_grad_norm=0.3,
@@ -96,11 +106,10 @@ def main():
         dataset_text_field="text",
     )
 
-    # --- THE FIX: Manually inject the parameters ---
-    # This bypasses the __init__ check that was failing
+    # --- THE FIX: Disable Packing ---
     args.max_seq_length = MAX_SEQ_LENGTH
-    args.packing = False
-    print(f"DEBUG: Manually injected max_seq_length={args.max_seq_length}")
+    args.packing = False  
+    print(f"DEBUG: Manually injected packing={args.packing}")
 
     # 6. Initialize Trainer
     trainer_kwargs = {
@@ -114,21 +123,20 @@ def main():
     # Handle the 'tokenizer' vs 'processing_class' rename dynamically
     trainer_sig = inspect.signature(SFTTrainer.__init__)
     if "processing_class" in trainer_sig.parameters:
-        print("DEBUG: Using 'processing_class' argument.")
         trainer_kwargs["processing_class"] = tokenizer
     else:
-        print("DEBUG: Using 'tokenizer' argument.")
         trainer_kwargs["tokenizer"] = tokenizer
 
-    # Initialize Trainer (Clean, without extra args)
+    # Initialize Trainer
     trainer = SFTTrainer(**trainer_kwargs)
 
     print("Starting training...")
     trainer.train()
 
-    print("Saving model...")
+    print(f"Saving final model to {os.path.abspath(OUTPUT_DIR)}...")
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
+    print("Done!")
 
 if __name__ == "__main__":
     main()
