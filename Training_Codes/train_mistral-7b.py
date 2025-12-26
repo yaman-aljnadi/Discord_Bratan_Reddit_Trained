@@ -65,7 +65,7 @@ def main():
         quantization_config=bnb_config,
         device_map="auto",
         use_cache=False,  # Disable cache for training
-        attn_implementation="sdpa" # MANDATORY for speed on DGX
+        attn_implementation="flash_attention_2" # MANDATORY for speed on DGX
     )
     
     model = prepare_model_for_kbit_training(model)
@@ -84,7 +84,6 @@ def main():
         ],
     )
 
-    # 5. Training Arguments
     args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
@@ -96,17 +95,13 @@ def main():
         save_strategy="steps",
         save_steps=2000,
         learning_rate=LEARNING_RATE,
-        bf16=True,
+        bf16=True,             # Excellent for Blackwell
         max_grad_norm=0.3,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
         report_to="tensorboard",
         ddp_find_unused_parameters=False,
-        
-        # --- MOVED PARAMETERS ---
-        max_seq_length=MAX_SEQ_LENGTH, # Moved here
-        packing=True,                  # Moved here
-        dataset_text_field=None,       # Explicitly set None since you use formatting_func
+        dataset_text_field=None, 
     )
 
     # 6. Initialize Trainer
@@ -117,8 +112,9 @@ def main():
         tokenizer=tokenizer,
         formatting_func=formatting_func,
         args=args,
-        # max_seq_length=MAX_SEQ_LENGTH,  <-- REMOVE THIS
-        # packing=True,                   <-- REMOVE THIS
+        # MOVED BACK HERE:
+        max_seq_length=MAX_SEQ_LENGTH, 
+        packing=True                   
     )
 
     print("Starting training...")
