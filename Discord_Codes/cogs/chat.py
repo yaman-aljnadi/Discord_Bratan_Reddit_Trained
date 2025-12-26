@@ -3,6 +3,7 @@ from discord.ext import commands
 import asyncio
 import os
 import wave
+# IMPORT PIPER DIRECTLY
 from piper import PiperVoice
 
 class AIChat(commands.Cog):
