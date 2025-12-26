@@ -1,6 +1,5 @@
 import os
 import torch
-import warnings
 from datasets import load_dataset
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from transformers import (
@@ -9,42 +8,49 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments,
 )
+
 from trl import SFTTrainer, SFTConfig
 
 # --- Configuration ---
+# Point this to your output directory from the previous script
 DATA_PATH = "/home/yaljnadi/Desktop/Discord_Bratan_Reddit_Trained/Data_Cleaning_And_Processing/processed_data_chat_best/" 
 OUTPUT_DIR = "./mistral-reddit-15B-v1"
 MODEL_ID = "mistralai/Mistral-7B-v0.1"
 
 # Hyperparameters for 15B tokens
-BATCH_SIZE = 16        
-GRAD_ACCUMULATION = 2  
-LEARNING_RATE = 1e-4   
-NUM_EPOCHS = 1         
-MAX_SEQ_LENGTH = 2048  
+# We use a larger batch size via accumulation to stabilize the massive data intake
+BATCH_SIZE = 16        # Adjust based on VRAM (try 8 or 16 per GPU)
+GRAD_ACCUMULATION = 2  # effective batch = batch_size * num_gpus * grad_accum
+LEARNING_RATE = 1e-4   # QLoRA standard (higher than full ft)
+NUM_EPOCHS = 1         # With 15B tokens, 1 epoch is likely enough to shift the style totally
+MAX_SEQ_LENGTH = 2048  # Mistral context window
 
 def formatting_func(example):
+    """
+    Formats the input into the Mistral instruction format.
+    Format: <s>[INST] {instruction} [/INST] {response}</s>
+    """
+    # Note: The tokenizer usually adds <s> automatically, so we handle the rest
     text = f"[INST] {example['instruction']} [/INST] {example['response']}"
     return [text]
 
 def main():
     print(f"--- Starting Training Job ---")
-    
-    # --- BLACKWELL SAFETY CHECK ---
-    # We suppress the warning to let you run, but we print a notice.
-    if torch.cuda.get_device_capability()[0] >= 10:
-        print("NOTE: Blackwell GPU detected. Ensure you are on PyTorch Nightly if you see instability.")
-    warnings.filterwarnings("ignore", category=UserWarning) 
+    print(f"Loading data from: {DATA_PATH}")
 
     # 1. Load Dataset
-    print(f"Loading data from: {DATA_PATH}")
+    # using 'streaming=True' is safer for 15B tokens if you have limited System RAM (128GB)
+    # However, for packing=True efficiency, we ideally want map-style.
+    # The 'datasets' library uses memory mapping (Apache Arrow), so it won't load 
+    # all 60GB+ of text into RAM at once, it reads from disk.
     dataset = load_dataset("json", data_dir=DATA_PATH, split="train")
+    
     print(f"Dataset loaded. Rows: {len(dataset)}")
 
     # 2. Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    tokenizer.pad_token = tokenizer.unk_token  
-    tokenizer.padding_side = "right" 
+    tokenizer.pad_token = tokenizer.unk_token  # Mistral specific hack
+    tokenizer.padding_side = "right" # Fix for fp16
 
     # 3. Load Model in 4-bit (QLoRA)
     bnb_config = BitsAndBytesConfig(
@@ -58,17 +64,18 @@ def main():
         MODEL_ID,
         quantization_config=bnb_config,
         device_map="auto",
-        use_cache=False,  
-        attn_implementation="sdpa" 
+        use_cache=False,  # Disable cache for training
+        attn_implementation="sdpa" # MANDATORY for speed on DGX
     )
     
     model = prepare_model_for_kbit_training(model)
 
     # 4. LoRA Configuration
+    # We target all linear layers to ensure the "personality" is deeply ingrained
     peft_config = LoraConfig(
         lora_alpha=16,
         lora_dropout=0.05,
-        r=64,   
+        r=64,   # Rank 64 is robust for large datasets
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=[
@@ -77,8 +84,7 @@ def main():
         ],
     )
 
-    # 5. Training Arguments (THE BYPASS FIX)
-    # We initialize SFTConfig WITHOUT the problematic args first
+    # 5. Training Arguments
     args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
@@ -96,15 +102,12 @@ def main():
         lr_scheduler_type="cosine",
         report_to="tensorboard",
         ddp_find_unused_parameters=False,
-        # We set this to None to satisfy validations, but we use formatting_func
-        dataset_text_field="text", 
+        
+        # --- MOVED PARAMETERS ---
+        max_seq_length=MAX_SEQ_LENGTH, # Moved here
+        packing=True,                  # Moved here
+        dataset_text_field=None,       # Explicitly set None since you use formatting_func
     )
-
-    # --- FORCING PARAMETERS ---
-    # We manually inject these attributes. This bypasses the __init__ check
-    # that was causing your TypeError.
-    args.max_seq_length = MAX_SEQ_LENGTH
-    args.packing = True
 
     # 6. Initialize Trainer
     trainer = SFTTrainer(
@@ -114,9 +117,8 @@ def main():
         tokenizer=tokenizer,
         formatting_func=formatting_func,
         args=args,
-        # DATA PROCESSING SPEEDUP for 15B tokens
-        # This uses multiple CPU cores to pack the data faster
-        dataset_num_proc=os.cpu_count(), 
+        # max_seq_length=MAX_SEQ_LENGTH,  <-- REMOVE THIS
+        # packing=True,                   <-- REMOVE THIS
     )
 
     print("Starting training...")
@@ -124,6 +126,8 @@ def main():
 
     print("Saving model...")
     trainer.save_model(OUTPUT_DIR)
+    
+    # Save tokenizer for inference convenience
     tokenizer.save_pretrained(OUTPUT_DIR)
 
 if __name__ == "__main__":
