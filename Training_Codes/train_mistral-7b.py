@@ -39,18 +39,13 @@ def main():
     print(f"Loading data from: {DATA_PATH}")
 
     # 1. Load Dataset
-    # using 'streaming=True' is safer for 15B tokens if you have limited System RAM (128GB)
-    # However, for packing=True efficiency, we ideally want map-style.
-    # The 'datasets' library uses memory mapping (Apache Arrow), so it won't load 
-    # all 60GB+ of text into RAM at once, it reads from disk.
     dataset = load_dataset("json", data_dir=DATA_PATH, split="train")
-    
     print(f"Dataset loaded. Rows: {len(dataset)}")
 
     # 2. Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    tokenizer.pad_token = tokenizer.unk_token  # Mistral specific hack
-    tokenizer.padding_side = "right" # Fix for fp16
+    tokenizer.pad_token = tokenizer.unk_token  
+    tokenizer.padding_side = "right"
 
     # 3. Load Model in 4-bit (QLoRA)
     bnb_config = BitsAndBytesConfig(
@@ -64,18 +59,18 @@ def main():
         MODEL_ID,
         quantization_config=bnb_config,
         device_map="auto",
-        use_cache=False,  # Disable cache for training
-        attn_implementation="flash_attention_2" # MANDATORY for speed on DGX
+        use_cache=False,
+        # CRITICAL CHANGE: Switch to 'sdpa' since flash-attn failed to install
+        attn_implementation="sdpa" 
     )
     
     model = prepare_model_for_kbit_training(model)
 
     # 4. LoRA Configuration
-    # We target all linear layers to ensure the "personality" is deeply ingrained
     peft_config = LoraConfig(
         lora_alpha=16,
         lora_dropout=0.05,
-        r=64,   # Rank 64 is robust for large datasets
+        r=64,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=[
@@ -84,6 +79,7 @@ def main():
         ],
     )
 
+    # 5. Training Arguments
     args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
@@ -95,7 +91,7 @@ def main():
         save_strategy="steps",
         save_steps=2000,
         learning_rate=LEARNING_RATE,
-        bf16=True,             # Excellent for Blackwell
+        bf16=True,
         max_grad_norm=0.3,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
@@ -109,10 +105,12 @@ def main():
         model=model,
         train_dataset=dataset,
         peft_config=peft_config,
-        tokenizer=tokenizer,
+        
+        # --- FIX 1: Renamed Argument ---
+        processing_class=tokenizer,  # Replaces 'tokenizer=tokenizer'
+        
         formatting_func=formatting_func,
         args=args,
-        # MOVED BACK HERE:
         max_seq_length=MAX_SEQ_LENGTH, 
         packing=True                   
     )
