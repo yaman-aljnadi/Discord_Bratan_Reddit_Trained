@@ -8,7 +8,8 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments,
 )
-from trl import SFTTrainer
+
+from trl import SFTTrainer, SFTConfig
 
 # --- Configuration ---
 # Point this to your output directory from the previous script
@@ -84,36 +85,40 @@ def main():
     )
 
     # 5. Training Arguments
-    args = TrainingArguments(
+    args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUMULATION,
-        gradient_checkpointing=True, # Saves VRAM, slightly slower
-        optim="paged_adamw_32bit",   # Paging helps avoid OOM
+        gradient_checkpointing=True,
+        optim="paged_adamw_32bit",
         logging_steps=100,
         save_strategy="steps",
-        save_steps=2000,             # Save every 2k steps just in case
+        save_steps=2000,
         learning_rate=LEARNING_RATE,
-        bf16=True,                   # DGX A100/H100 supports bfloat16 (CRITICAL)
+        bf16=True,
         max_grad_norm=0.3,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
         report_to="tensorboard",
-        ddp_find_unused_parameters=False, # Speed up DDP
+        ddp_find_unused_parameters=False,
+        
+        # --- MOVED PARAMETERS ---
+        max_seq_length=MAX_SEQ_LENGTH, # Moved here
+        packing=True,                  # Moved here
+        dataset_text_field=None,       # Explicitly set None since you use formatting_func
     )
 
     # 6. Initialize Trainer
-    # SFTTrainer handles the formatting and "Packing" (combining short samples into 2048 blocks)
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset,
         peft_config=peft_config,
-        max_seq_length=MAX_SEQ_LENGTH,
         tokenizer=tokenizer,
         formatting_func=formatting_func,
         args=args,
-        packing=True, # CRITICAL: This speeds up training by 10x-20x on short reddit comments
+        # max_seq_length=MAX_SEQ_LENGTH,  <-- REMOVE THIS
+        # packing=True,                   <-- REMOVE THIS
     )
 
     print("Starting training...")
