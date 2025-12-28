@@ -17,7 +17,7 @@ OUTPUT_DIR = "./mistral-reddit-15B-v1"
 MODEL_ID = "mistralai/Mistral-7B-v0.1"
 
 # Hyperparameters
-BATCH_SIZE = 64        
+BATCH_SIZE = 32        
 GRAD_ACCUMULATION = 2  
 LEARNING_RATE = 1e-4   
 NUM_EPOCHS = 1        
