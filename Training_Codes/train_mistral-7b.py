@@ -12,7 +12,7 @@ from transformers import (
 from trl import SFTTrainer, SFTConfig
 
 # --- Configuration ---
-DATA_PATH = "/home/yaljnadi/Desktop/Discord_Bratan_Reddit_Trained/Data_Cleaning_And_Processing/processed_data_chat_best/"
+DATA_PATH = "/home/data/files/Yaman/Discord_Bratan_Reddit_Trained/Data_Cleaning_And_Processing/processed_data_chat_best/"
 OUTPUT_DIR = "./mistral-reddit-15B-v1"
 MODEL_ID = "mistralai/Mistral-7B-v0.1"
 
