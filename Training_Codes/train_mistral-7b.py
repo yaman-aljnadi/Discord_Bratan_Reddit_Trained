@@ -32,7 +32,7 @@ def main():
     print(f"--- Starting Training Job on Tesla V100 (Dual GPU DDP) ---")
     
     # 1. Load Dataset
-    dataset = load_dataset("json", data_dir=DATA_PATH, split="train")
+    dataset = load_dataset("json", data_dir=DATA_PATH, split="train[:10%]")
 
     # 2. Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
