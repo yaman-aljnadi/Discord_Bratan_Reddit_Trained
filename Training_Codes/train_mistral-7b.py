@@ -58,7 +58,8 @@ def main():
         quantization_config=bnb_config,
         device_map=device_map,
         use_cache=False,
-        attn_implementation="eager" # Critical for V100
+        attn_implementation="eager", # Critical for V100
+        torch_dtype=torch.float16
     )
     
     # --- CRITICAL STABILITY FIX FOR V100 ---
