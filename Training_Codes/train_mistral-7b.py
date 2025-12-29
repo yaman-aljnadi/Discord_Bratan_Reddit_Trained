@@ -59,7 +59,7 @@ def main():
         quantization_config=bnb_config,
         device_map=device_map, # CHANGED from {"": 0}
         use_cache=False,
-        attn_implementation="sdpa" 
+        attn_implementation="eager" 
     )
     
     model = prepare_model_for_kbit_training(model)
