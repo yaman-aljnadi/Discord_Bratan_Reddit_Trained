@@ -77,32 +77,32 @@ def main():
         ],
     )
 
-    # 5. Initialize Config
     args = SFTConfig(
-        output_dir=OUTPUT_DIR,
-        num_train_epochs=NUM_EPOCHS,
-        per_device_train_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUMULATION,
-        gradient_checkpointing=True,
-        optim="paged_adamw_32bit",
-        logging_steps=50,
-        save_strategy="steps",
-        save_steps=500, 
-        learning_rate=LEARNING_RATE,
-        
-        # CRITICAL FIX: V100 requires fp16, not bf16
-        bf16=False,   # CHANGED
-        fp16=True,    # CHANGED
-        
-        max_grad_norm=0.3,
-        warmup_ratio=0.03,
-        lr_scheduler_type="cosine",
-        report_to="tensorboard",
-        
-        # Required for DDP with LoRA
-        ddp_find_unused_parameters=False, 
-        dataset_text_field="text",
-    )
+            output_dir=OUTPUT_DIR,
+            num_train_epochs=NUM_EPOCHS,
+            per_device_train_batch_size=BATCH_SIZE,
+            gradient_accumulation_steps=GRAD_ACCUMULATION,
+            
+            # --- CRITICAL FIX FOR SEGFAULT ---
+            gradient_checkpointing=True,
+            # You MUST set this to False for 4-bit LoRA to prevent crashing
+            gradient_checkpointing_kwargs={"use_reentrant": False}, 
+            # ---------------------------------
+
+            optim="paged_adamw_32bit",
+            logging_steps=50,
+            save_strategy="steps",
+            save_steps=500, 
+            learning_rate=LEARNING_RATE,
+            bf16=False,   
+            fp16=True,    
+            max_grad_norm=0.3,
+            warmup_ratio=0.03,
+            lr_scheduler_type="cosine",
+            report_to="tensorboard",
+            ddp_find_unused_parameters=False, 
+            dataset_text_field="text",
+        )
 
     args.max_seq_length = MAX_SEQ_LENGTH
     args.packing = False  
