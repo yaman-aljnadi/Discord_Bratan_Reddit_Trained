@@ -24,23 +24,25 @@ LEARNING_RATE = 1e-4
 NUM_EPOCHS = 1        
 MAX_SEQ_LENGTH = 2048   
 
-def formatting_func(example):
-    instr = example.get('instruction', '')
-    resp = example.get('response', '')
-    return f"[INST] {instr} [/INST] {resp}"
-
 def main():
     print(f"--- Starting Training Job on Tesla V100 (Dual GPU DDP) ---")
+
+    # --- 1. SETUP DISTRIBUTED ENVIRONMENT ---
+    # We must do this BEFORE anything else to prevent the SIGSEGV
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)  # <--- CRITICAL FIX: Anchor process to specific GPU
     
-    # 1. Load Dataset
+    # 2. Load Dataset
     dataset = load_dataset("json", data_dir=DATA_PATH, split="train[:10%]")
 
-    # 2. Load Tokenizer
+    # 3. Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.unk_token  
     tokenizer.padding_side = "right"
+    # Fix for V100/DDP: Ensure tokenizer knows the max length to prevent dynamic allocation bugs
+    tokenizer.model_max_length = MAX_SEQ_LENGTH 
 
-    # 3. Load Model (Optimized for V100 - FP16)
+    # 4. Load Model (Optimized for V100 - FP16)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -48,8 +50,7 @@ def main():
         bnb_4bit_use_double_quant=True,
     )
 
-    # DYNAMIC DEVICE MAPPING FOR MULTI-GPU
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    # DYNAMIC DEVICE MAPPING
     device_map = {"": local_rank}
 
     print(f"Loading model on GPU {local_rank}...")
@@ -58,7 +59,7 @@ def main():
         quantization_config=bnb_config,
         device_map=device_map,
         use_cache=False,
-        attn_implementation="eager" # Critical for V100
+        attn_implementation="eager" 
     )
     
     # --- CRITICAL STABILITY FIX FOR V100 ---
