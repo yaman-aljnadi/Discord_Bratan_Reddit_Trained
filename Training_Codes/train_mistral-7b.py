@@ -57,7 +57,7 @@ def main():
         device_map=device_map,
         use_cache=False,
         attn_implementation="eager",
-        torch_dtype=torch.float16 
+        dtype=torch.float16 
     )
     
     # --- MANUAL MODEL PREPARATION (The Fix) ---
