@@ -3,7 +3,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import os
 import asyncio
-from services.llm_engine import MistralEngine
+from Discord_Codes.services.llm_engine import MistralEngine
 
 # 1. Setup
 load_dotenv()
